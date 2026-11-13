@@ -29927,6 +29927,9 @@ static void r8159_hw_phy_cfg(struct r8152 *tp)
 	/* disable ALDPS before updating the PHY parameters */
 	r8153_aldps_en(tp, false);
 
+	/* disable EEE before updating the PHY parameters (as r8157 does) */
+	rtl_eee_enable(tp, false);
+
 	ret = r8153_phy_status(tp, PHY_STAT_LAN_ON);
 	if (ret < 0)
 		return;
