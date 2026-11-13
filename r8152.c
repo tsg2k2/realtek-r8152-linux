@@ -809,7 +809,7 @@ enum rtl_register_content {
 #define is_speed_2500(_speed)	(((_speed) & (_2500bps | LINK_STATUS)) == (_2500bps | LINK_STATUS))
 #define is_flow_control(_speed)	(((_speed) & (_tx_flow | _rx_flow)) == (_tx_flow | _rx_flow))
 
-#define RTL8152_MAX_TX		4
+#define RTL8152_MAX_TX		8	/* local: was 4; more linear TX bufs in flight */
 #define RTL8152_MAX_RX		10
 #define INTBUFSIZE		2
 
@@ -1161,7 +1161,7 @@ enum adv_access_type {
  * The RTL chips use a 64 element hash table based on the Ethernet CRC.
  */
 static const int multicast_filter_limit = 32;
-static unsigned int agg_buf_sz = 16384;
+static unsigned int agg_buf_sz = 32768;	/* local: was 16384 */
 
 #define RTL_LIMITED_TSO_SIZE	(size_to_mtu(agg_buf_sz) - tp->tx_desc.size)
 
@@ -33533,46 +33533,43 @@ u8 rtl8152_get_version(struct usb_interface *intf)
 }
 EXPORT_SYMBOL_GPL(rtl8152_get_version);
 
+/* xHCI controllers that freeze (or freeze the NIC) on SG TX URBs.
+ * Realtek listed ASM2142 only. Local additions: the ASMedia USB 3.2
+ * Gen 2x2 / USB4 families and AMD Promontory 21 (ASMedia silicon behind
+ * an AMD ID) - an RTL8159 locks up within seconds of bidirectional 10G
+ * load with SG on, and runs clean with linear buffers.
+ */
+static const struct pci_device_id rtl_no_sg_hc_ids[] = {
+	{ PCI_DEVICE(PCI_VENDOR_ID_ASMEDIA, 0x2142) },	/* ASM2142/ASM3142 */
+	{ PCI_DEVICE(PCI_VENDOR_ID_ASMEDIA, 0x3242) },	/* ASM3242 USB 3.2 Gen 2x2 */
+	{ PCI_DEVICE(PCI_VENDOR_ID_ASMEDIA, 0x2426) },	/* ASM4242 USB4 xHCI */
+	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, 0x43f7) },	/* Promontory 21, 600 series */
+	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, 0x43fd) },	/* Promontory 21, 800 series */
+	{ }
+};
+
 static int rtl_hc_support_sg(struct usb_device *udev)
 {
 	struct device *hc_dev;
 	struct pci_dev *pdev;
-	int ret = 0;
 
 	hc_dev = udev->bus ? udev->bus->controller : NULL;
-	if (!hc_dev) {
-		ret = -ENODEV;
-		goto out;
-	}
+	if (!hc_dev)
+		return -ENODEV;
 
 	if (hc_dev->bus != &pci_bus_type)
-		goto out;
+		return 0;
 
 	pdev = to_pci_dev(hc_dev);
 	dev_dbg(&udev->dev,
 		"Host controller vendor ID = %#04x, device ID = %#04x\n",
 		pdev->vendor, pdev->device);
 
-	/*  ASM2142 fails to handle URBs with a large number of SG fragments,
-	 *  causing the firmware freeze.
-	 *  Fallback to linear buffering for stability.
-	 */
-	switch (pdev->vendor) {
-	case PCI_VENDOR_ID_ASMEDIA:
-		switch (pdev->device) {
-		case 0x2142:
-			ret = -EOPNOTSUPP;
-			break;
-		default:
-			break;
-		}
-		break;
-	default:
-		break;
-	}
+	/* Fall back to linear buffering for stability. */
+	if (pci_match_id(rtl_no_sg_hc_ids, pdev))
+		return -EOPNOTSUPP;
 
-out:
-	return ret;
+	return 0;
 }
 
 #ifdef RTL8152_DEBUG
