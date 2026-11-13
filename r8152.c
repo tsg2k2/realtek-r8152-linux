@@ -33185,7 +33185,7 @@ static void rtl8157_unload(struct r8152 *tp)
 	if (test_bit(RTL8152_UNPLUG, &tp->flags))
 		return;
 
-	r8153_power_cut_en(tp, false);
+	r8157_power_cut_en(tp, false);
 
 	/* Disable Interrupt Mitigation */
 	if (ocp_byte_clr_bits(tp, MCU_TYPE_USB, 0xcf04,
