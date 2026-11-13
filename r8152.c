@@ -15426,7 +15426,7 @@ static void r8157_patch_code(struct r8152 *tp)
 				       new_ver);
 		}
 
-		new_ver = 1;
+		new_ver = 2;	/* was 1: re-arm with PLA_BP2_EN */
 		if (rtl_check_fw_ver_ok(tp, USB_FW_PLA_VER, new_ver)) {
 			rtl_clear_bp(tp, MCU_TYPE_PLA);
 
@@ -15436,7 +15436,10 @@ static void r8157_patch_code(struct r8152 *tp)
 
 			ocp_write_word(tp, MCU_TYPE_PLA, PLA_BP_BA, 0x8000);
 			ocp_write_word(tp, MCU_TYPE_PLA, PLA_BP_0, 0x1e7e);
-			ocp_write_word(tp, MCU_TYPE_PLA, PLA_BP_EN, 0x0001);
+			/* 16-breakpoint PLA: 0xfc38 is PLA_BP_8, the enable is
+			 * PLA_BP2_EN (as rtl_clear_bp and the Windows driver use).
+			 */
+			ocp_write_word(tp, MCU_TYPE_PLA, PLA_BP2_EN, 0x0001);
 			ocp_write_byte(tp, MCU_TYPE_USB, USB_FW_PLA_VER,
 				       new_ver);
 		}
