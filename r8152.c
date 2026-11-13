@@ -11998,10 +11998,18 @@ static bool rtl_speed_down(struct r8152 *tp)
 			if (r < 0)
 				goto out1;
 			lpa2 = r;
-			r = r8152_mdio_read(tp, OCP_10GBT_STAT);
-			if (r < 0)
-				goto out1;
-			lpa3 = r;
+			/* OCP_10GBT_STAT is an OCP address, not an MII register
+			 * number: r8152_mdio_read() would read 0xa400 + 2 * 0xa5d6,
+			 * which wraps to 0xefac.
+			 */
+			{
+				u16 stat;
+
+				r = ocp_reg_read(tp, OCP_10GBT_STAT, &stat);
+				if (r < 0)
+					goto out1;
+				lpa3 = stat;
+			}
 			if (lpa & (LPA_10HALF | LPA_10FULL)) {
 				anar |= ADVERTISE_10HALF | ADVERTISE_10FULL;
 				rtl_eee_plus_en(tp, true);
