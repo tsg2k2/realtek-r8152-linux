@@ -5938,7 +5938,7 @@ static int rtl8157_runtime_enable(struct r8152 *tp, bool enable)
 		if (ret < 0)
 			goto out;
 
-		ret = r8153_u2p3en(tp, false);
+		ret = r8157_u2p3en(tp, false);
 		if (ret < 0)
 			goto out;
 
@@ -5976,7 +5976,7 @@ static int rtl8157_runtime_enable(struct r8152 *tp, bool enable)
 		if (ret < 0)
 			goto out;
 
-		ret = r8153_u2p3en(tp, false);
+		ret = r8157_u2p3en(tp, false);
 	}
 
 out:
