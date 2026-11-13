@@ -34434,6 +34434,12 @@ static ssize_t sg_en_store(struct device *dev, struct device_attribute *attr,
 	struct net_device *netdev = to_net_dev(dev);
 	struct r8152 *tp = netdev_priv(netdev);
 
+	/* tx_bottom, rtl_gso_check and set_tx_qlen all key off tp->sg_use;
+	 * flipping it with TX in flight mixes the SG and linear layouts.
+	 */
+	if (netif_running(netdev))
+		return -EBUSY;
+
 	if (!strncmp(buf, "enable", 6) &&
 	    usb_device_no_sg_constraint(tp->udev) &&
 	    !rtl_hc_support_sg(tp->udev))
