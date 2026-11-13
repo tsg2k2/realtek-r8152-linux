@@ -852,6 +852,8 @@ enum rtl8152_flags {
 	RX_EPROTO,
 	RECOVER_SPEED,
 	DISABLE_EEE_BOTTOM,
+	IN_PRE_RESET,
+	PROBED_WITH_NO_ERRORS,
 };
 
 /* Define these values to match your device */
@@ -1077,6 +1079,7 @@ struct r8152 {
 	bool eee_en;
 	int intr_interval;
 	u32 saved_wolopts;
+	unsigned int reg_access_reset_count;
 	u32 msg_enable;
 	u32 tx_qlen;
 	u32 coalesce;
@@ -1165,6 +1168,65 @@ static unsigned int agg_buf_sz = 32768;	/* local: was 16384 */
 
 #define RTL_LIMITED_TSO_SIZE	(size_to_mtu(agg_buf_sz) - tp->tx_desc.size)
 
+/* If register access fails, block further access and queue a USB reset.
+ * A wedged chip answers nothing; without this every later access waits the
+ * full 5 s control timeout (rtl8157_down issues dozens, all under RTNL).
+ * Ported from upstream (RTL8152_INACCESSIBLE); this driver's RTL8152_UNPLUG
+ * flag already gates every access path, so it doubles as "inaccessible".
+ */
+#define REGISTER_ACCESS_MAX_RESETS	3
+
+static void rtl_set_inaccessible(struct r8152 *tp)
+{
+	set_bit(RTL8152_UNPLUG, &tp->flags);
+	smp_mb__after_atomic();
+}
+
+static
+int r8152_control_msg(struct r8152 *tp, unsigned int pipe, __u8 request,
+		      __u8 requesttype, __u16 value, __u16 index, void *data,
+		      __u16 size, int timeout)
+{
+	int ret;
+
+	if (test_bit(RTL8152_UNPLUG, &tp->flags))
+		return -ENODEV;
+
+	ret = usb_control_msg(tp->udev, pipe, request, requesttype,
+			      value, index, data, size, timeout);
+
+	if (ret >= 0) {
+		tp->reg_access_reset_count = 0;
+		return ret;
+	}
+
+	/* Unplugged: generic_ocp_* marks it via rtl_set_unplug(). Before
+	 * probe completes, keep the old behaviour and just fail probe.
+	 */
+	if (ret == -ENODEV || !test_bit(PROBED_WITH_NO_ERRORS, &tp->flags))
+		return ret;
+
+	rtl_set_inaccessible(tp);
+
+	/* Reset already in progress: post_reset will restore access. */
+	if (test_bit(IN_PRE_RESET, &tp->flags))
+		return ret;
+
+	if (tp->reg_access_reset_count < REGISTER_ACCESS_MAX_RESETS) {
+		dev_err(&tp->intf->dev,
+			"register access failed (%d), blocking access and resetting\n",
+			ret);
+		usb_queue_reset_device(tp->intf);
+		tp->reg_access_reset_count++;
+	} else if (tp->reg_access_reset_count == REGISTER_ACCESS_MAX_RESETS) {
+		dev_err(&tp->intf->dev, "Tried to reset %d times; giving up.\n",
+			REGISTER_ACCESS_MAX_RESETS);
+		tp->reg_access_reset_count++;
+	}
+
+	return ret;
+}
+
 static
 int get_registers(struct r8152 *tp, u16 value, u16 index, u16 size, void *data)
 {
@@ -1175,9 +1237,9 @@ int get_registers(struct r8152 *tp, u16 value, u16 index, u16 size, void *data)
 	if (!tmp)
 		return -ENOMEM;
 
-	ret = usb_control_msg(tp->udev, tp->pipe_ctrl_in,
-			      RTL8152_REQ_GET_REGS, RTL8152_REQT_READ,
-			      value, index, tmp, size, USB_CTRL_GET_TIMEOUT);
+	ret = r8152_control_msg(tp, tp->pipe_ctrl_in,
+				RTL8152_REQ_GET_REGS, RTL8152_REQT_READ,
+				value, index, tmp, size, USB_CTRL_GET_TIMEOUT);
 	if (ret < 0)
 		memset(data, 0xff, size);
 	else
@@ -1198,9 +1260,9 @@ int set_registers(struct r8152 *tp, u16 value, u16 index, u16 size, void *data)
 	if (!tmp)
 		return -ENOMEM;
 
-	ret = usb_control_msg(tp->udev, tp->pipe_ctrl_out,
-			      RTL8152_REQ_SET_REGS, RTL8152_REQT_WRITE,
-			      value, index, tmp, size, USB_CTRL_SET_TIMEOUT);
+	ret = r8152_control_msg(tp, tp->pipe_ctrl_out,
+				RTL8152_REQ_SET_REGS, RTL8152_REQT_WRITE,
+				value, index, tmp, size, USB_CTRL_SET_TIMEOUT);
 
 	kfree(tmp);
 
@@ -31027,9 +31089,11 @@ static int rtl8152_pre_reset(struct usb_interface *intf)
 	usb_kill_urb(tp->intr_urb);
 	cancel_delayed_work_sync(&tp->schedule);
 	napi_disable(&tp->napi);
-	if (netif_carrier_ok(netdev)) {
+	if (netif_carrier_ok(netdev) && !test_bit(RTL8152_UNPLUG, &tp->flags)) {
 		mutex_lock(&tp->control);
+		set_bit(IN_PRE_RESET, &tp->flags);
 		tp->rtl_ops.disable(tp);
+		clear_bit(IN_PRE_RESET, &tp->flags);
 		mutex_unlock(&tp->control);
 	}
 
@@ -31044,6 +31108,20 @@ static int rtl8152_post_reset(struct usb_interface *intf)
 
 	if (!tp)
 		return 0;
+
+	/* Recovering from a register-access failure: the chip was wedged and
+	 * its MCU/PHY state is unknown, so re-run init like reset_resume does.
+	 */
+	if (test_bit(RTL8152_UNPLUG, &tp->flags) &&
+	    tp->udev->state != USB_STATE_NOTATTACHED) {
+		clear_bit(RTL8152_UNPLUG, &tp->flags);
+		smp_mb__after_atomic();
+		mutex_lock(&tp->control);
+		rtl_reset_ocp_base(tp);
+		tp->rtl_ops.init(tp);
+		mutex_unlock(&tp->control);
+		queue_delayed_work(system_long_wq, &tp->hw_phy_work, 0);
+	}
 
 	/* reset the MAC address in case of policy change */
 	if (determine_ethernet_addr(tp, &ss) >= 0) {
@@ -34702,6 +34780,8 @@ static int rtl8152_probe(struct usb_interface *intf,
 		goto out4;
 	}
 #endif
+
+	set_bit(PROBED_WITH_NO_ERRORS, &tp->flags);
 
 	return 0;
 
